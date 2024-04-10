@@ -515,3 +515,229 @@ fn softmax_forward(probs: *mut f32, logits: *const f32, b: c_int, t: c_int, v: c
         }
     }
 }
+
+// Backward functions
+
+fn residual_backward(dinp1: *mut f32, dinp2: *mut f32, dout: *const f32, n: c_int) {
+    unsafe {
+        for i in 0..n {
+            *dinp1.offset(i as isize) += *dout.offset(i as isize);
+            *dinp2.offset(i as isize) += *dout.offset(i as isize);
+        }
+    }
+}
+
+fn matmul_backward(dinp: *mut f32, dweight: *mut f32, dbias: *mut f32, dout: *const f32, inp: *const f32, weight: *const f32, b: c_int, t: c_int, c: c_int, oc: c_int) {
+    unsafe {
+        for bt in 0..(b * t) {
+            for o in 0..oc {
+                let dout_bt = dout.offset((bt * oc + o) as isize);
+                let wrow = weight.offset((o * c) as isize);
+                let dinp_bt = dinp.offset((bt * c) as isize);
+                for i in 0..c {
+                    *dinp_bt.offset(i as isize) += *wrow.offset(i as isize) * *dout_bt;
+                }
+            }
+        }
+
+        for o in 0..oc {
+            for bt in 0..(b * t) {
+                let dout_bt = dout.offset((bt * oc + o) as isize);
+                let inp_bt = inp.offset((bt * c) as isize);
+                let dwrow = dweight.offset((o * c) as isize);
+                if !dbias.is_null() {
+                    *dbias.offset(o as isize) += *dout_bt;
+                }
+                for i in 0..c {
+                    *dwrow.offset(i as isize) += *inp_bt.offset(i as isize) * *dout_bt;
+                }
+            }
+        }
+    }
+}
+
+fn attention_backward(dinp: *mut f32, dpreatt: *mut f32, datt: *mut f32, dout: *const f32, inp: *const f32, att: *const f32, b: c_int, t: c_int, c: c_int, nh: c_int) {
+    let c3 = c * 3;
+    let hs = c / nh;
+    let scale = 1.0 / (hs as f32).sqrt();
+
+    unsafe {
+        for bth in 0..(b * t * nh) {
+            let (b, t, h) = (bth / (t * nh), (bth / nh) % t, bth % nh);
+            let att_bth = att.offset((bth * t) as isize);
+            let datt_bth = datt.offset((bth * t) as isize);
+            let dpreatt_bth = dpreatt.offset((bth * t) as isize);
+            let dquery_t = dinp.offset(((b * t + t) * c3 + h * hs) as isize);
+            let query_t = inp.offset(((b * t + t) * c3 + h * hs) as isize);
+
+            let dout_bth = dout.offset(((b * t + t) * c + h * hs) as isize);
+            for t2 in 0..=t {
+                let value_t2 = inp.offset(((b * t + t2) * c3 + h * hs + c * 2) as isize);
+                let dvalue_t2 = dinp.offset(((b * t + t2) * c3 + h * hs + c * 2) as isize);
+                for i in 0..hs {
+                    *datt_bth.offset(t2 as isize) += *value_t2.offset(i as isize) * *dout_bth.offset(i as isize);
+                    *dvalue_t2.offset(i as isize) += *att_bth.offset(t2 as isize) * *dout_bth.offset(i as isize);
+                }
+            }
+
+            for t2 in 0..=t {
+                for t3 in 0..=t {
+                    let indicator = if t2 == t3 { 1.0 } else { 0.0 };
+                    let local_derivative = *att_bth.offset(t2 as isize) * (indicator - *att_bth.offset(t3 as isize));
+                    *dpreatt_bth.offset(t3 as isize) += local_derivative * *datt_bth.offset(t2 as isize);
+                }
+            }
+
+            for t2 in 0..=t {
+                let key_t2 = inp.offset(((b * t + t2) * c3 + h * hs + c) as isize);
+                let dkey_t2 = dinp.offset(((b * t + t2) * c3 + h * hs + c) as isize);
+                for i in 0..hs {
+                    *dquery_t.offset(i as isize) += *key_t2.offset(i as isize) * *dpreatt_bth.offset(t2 as isize) * scale;
+                    *dkey_t2.offset(i as isize) += *query_t.offset(i as isize) * *dpreatt_bth.offset(t2 as isize) * scale;
+                }
+            }
+        }
+    }
+}
+
+fn layernorm_backward(dinp: *mut f32, dweight: *mut f32, dbias: *mut f32, dout: *const f32, inp: *const f32, weight: *const f32, mean: *const f32, rstd: *const f32, b: c_int, t: c_int, c: c_int) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let dout_bt = dout.offset((bt * c) as isize);
+            let inp_bt = inp.offset((bt * c) as isize);
+            let dinp_bt = dinp.offset((bt * c) as isize);
+            let mean_bt = *mean.offset(bt as isize);
+            let rstd_bt = *rstd.offset(bt as isize);
+
+            let mut dnorm_mean = 0.0;
+            let mut dnorm_norm_mean = 0.0;
+            for i in 0..c {
+                let norm_bti = (inp_bt.offset(i as isize) - mean_bt) * rstd_bt;
+                let dnorm_i = *weight.offset(i as isize) * *dout_bt.offset(i as isize);
+                dnorm_mean += dnorm_i;
+                dnorm_norm_mean += dnorm_i * norm_bti;
+            }
+            dnorm_mean /= c as f32;
+            dnorm_norm_mean /= c as f32;
+
+            for i in 0..c {
+                let norm_bti = (*inp_bt.offset(i as isize) - mean_bt) * rstd_bt;
+                let dnorm_i = *weight.offset(i as isize) * *dout_bt.offset(i as isize);
+                *dbias.offset(i as isize) += *dout_bt.offset(i as isize);
+                *dweight.offset(i as isize) += norm_bti * *dout_bt.offset(i as isize);
+                let mut dval = 0.0;
+                dval += dnorm_i;
+                dval -= dnorm_mean;
+                dval -= norm_bti * dnorm_norm_mean;
+                dval *= rstd_bt;
+                *dinp_bt.offset(i as isize) += dval;
+            }
+        }
+    }
+}
+
+fn gelu_backward(dinp: *mut f32, inp: *const f32, dout: *const f32, n: c_int) {
+    let s = (2.0 / std::f32::consts::PI).sqrt();
+    unsafe {
+        for i in 0..n {
+            let x = *inp.offset(i as isize);
+            let cube = 0.044715 * x * x * x;
+            let tanh_arg = s * (x + cube);
+            let tanh_out = tanh_arg.tanh();
+            let coshf_out = (2.0 * tanh_arg).cosh();
+            let sech_out = 1.0 / (coshf_out * coshf_out);
+            let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
+            *dinp.offset(i as isize) += local_grad * *dout.offset(i as isize);
+        }
+    }
+}
+
+fn softmax_backward(dinp: *mut f32, dout: *const f32, probs: *const f32, b: c_int, t: c_int, v: c_int) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let dout_bt = dout.offset((bt * v) as isize);
+            let probs_bt = probs.offset((bt * v) as isize);
+            let dinp_bt = dinp.offset((bt * v) as isize);
+            for i in 0..v {
+                let p = *probs_bt.offset(i as isize);
+                for j in 0..v {
+                    let indicator = if i == j { 1.0 } else { 0.0 };
+                    *dinp_bt.offset(i as isize) += (p - indicator) * *dout_bt.offset(j as isize);
+                }
+            }
+        }
+    }
+}
+
+// Utility functions
+
+fn init_parameters(params: &mut ParameterTensors, config: &ViTConfig) {
+    let v = config.vocab_size as usize;
+    let c = config.channels as usize;
+    let l = config.num_layers as usize;
+
+    unsafe {
+        for i in 0..(v * c) {
+            *params.wte.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(config.max_seq_len as usize * c) {
+            *params.wpe.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c) {
+            *params.ln1w.offset(i as isize) = 1.0;
+            *params.ln2w.offset(i as isize) = 1.0;
+        }
+
+        for i in 0..(l * 3 * c * c) {
+            *params.qkvw.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c * c) {
+            *params.attprojw.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * 4 * c * c) {
+            *params.fcw.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c * 4 * c) {
+            *params.fcprojw.offset(i as isize) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..c {
+            *params.lnfw.offset(i as isize) = 1.0;
+        }
+    }
+}
+
+fn save_checkpoint(params: &ParameterTensors, config: &ViTConfig, filepath: &str) {
+    let mut file = File::create(filepath).unwrap();
+    unsafe {
+        file.write_all(std::slice::from_raw_parts(
+            params.wte as *const u8,
+            config.vocab_size as usize * config.channels as usize * std::mem::size_of::<f32>(),
+        )).unwrap();
+        // Save other parameters similarly
+    }
+}
+
+fn load_checkpoint(params: &mut ParameterTensors, config: &ViTConfig, filepath: &str) {
+    let mut file = File::open(filepath).unwrap();
+    unsafe {
+        file.read_exact(std::slice::from_raw_parts_mut(
+            params.wte as *mut u8,
+            config.vocab_size as usize * config.channels as usize * std::mem::size_of::<f32>(),
+        )).unwrap();
+        // Load other parameters similarly
+    }
+}
+
+fn optimizer_step(model: &mut ViT, learning_rate: f32) {
+    unsafe {
+        for i in 0..model.num_parameters {
+            *model.params_memory.offset(i as isize) -= learning_rate * *model.grads_memory.offset(i as isize);
+        }
+    }
+}
