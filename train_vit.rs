@@ -185,7 +185,190 @@ impl ViT {
         }
     }
     
-    // Implement the rest of the methods: forward, zero_grad, backward, update, free
+    fn forward(&mut self, inputs: *const c_int, targets: *const c_int, b: c_int, t: c_int) {
+        // ... (previous code for memory allocation and input/target copying)
+
+        let params = &self.params;
+        let acts = &mut self.acts;
+
+        // Forward pass
+        unsafe {
+            encoder_forward(acts.encoded, inputs, params.wte, params.wpe, b, t, c);
+
+            let mut residual: *mut f32 = std::ptr::null_mut();
+            for l in 0..l {
+                residual = if l == 0 {
+                    acts.encoded
+                } else {
+                    acts.residual3.offset((l - 1) * b * t * c)
+                };
+
+                let l_ln1w = params.ln1w.offset(l * c);
+                let l_ln1b = params.ln1b.offset(l * c);
+                let l_qkvw = params.qkvw.offset(l * 3 * c * c);
+                let l_qkvb = params.qkvb.offset(l * 3 * c);
+                let l_attprojw = params.attprojw.offset(l * c * c);
+                let l_attprojb = params.attprojb.offset(l * c);
+                let l_ln2w = params.ln2w.offset(l * c);
+                let l_ln2b = params.ln2b.offset(l * c);
+                let l_fcw = params.fcw.offset(l * 4 * c * c);
+                let l_fcb = params.fcb.offset(l * 4 * c);
+                let l_fcprojw = params.fcprojw.offset(l * c * 4 * c);
+                let l_fcprojb = params.fcprojb.offset(l * c);
+
+                let l_ln1 = acts.ln1.offset(l * b * t * c);
+                let l_ln1_mean = acts.ln1_mean.offset(l * b * t);
+                let l_ln1_rstd = acts.ln1_rstd.offset(l * b * t);
+                let l_qkv = acts.qkv.offset(l * b * t * 3 * c);
+                let l_atty = acts.atty.offset(l * b * t * c);
+                let l_preatt = acts.preatt.offset(l * b * nh * t * t);
+                let l_att = acts.att.offset(l * b * nh * t * t);
+                let l_attproj = acts.attproj.offset(l * b * t * c);
+                let l_residual2 = acts.residual2.offset(l * b * t * c);
+                let l_ln2 = acts.ln2.offset(l * b * t * c);
+                let l_ln2_mean = acts.ln2_mean.offset(l * b * t);
+                let l_ln2_rstd = acts.ln2_rstd.offset(l * b * t);
+                let l_fch = acts.fch.offset(l * b * t * 4 * c);
+                let l_fch_gelu = acts.fch_gelu.offset(l * b * t * 4 * c);
+                let l_fcproj = acts.fcproj.offset(l * b * t * c);
+                let l_residual3 = acts.residual3.offset(l * b * t * c);
+
+                layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, b, t, c);
+                matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, b, t, c, 3 * c);
+                attention_forward(l_atty, l_preatt, l_att, l_qkv, b, t, c, nh);
+                matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, b, t, c, c);
+                residual_forward(l_residual2, residual, l_attproj, b * t * c);
+                layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, b, t, c);
+                matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, b, t, c, 4 * c);
+                gelu_forward(l_fch_gelu, l_fch, b * t * 4 * c);
+                matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, b, t, 4 * c, c);
+                residual_forward(l_residual3, l_residual2, l_fcproj, b * t * c);
+            }
+
+            residual = acts.residual3.offset((l - 1) * b * t * c);
+            layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, b, t, c);
+            matmul_forward(acts.logits, acts.lnf, params.wte, std::ptr::null_mut(), b, t, c, v);
+            softmax_forward(acts.probs, acts.logits, b, t, v);
+        }
+
+        if !targets.is_null() {
+            unsafe {
+                crossentropy_forward(acts.losses, acts.probs, targets, b, t, v);
+
+                let mut mean_loss = 0.0;
+                for i in 0..(b * t) {
+                    mean_loss += *acts.losses.offset(i as isize);
+                }
+                mean_loss /= (b * t) as f32;
+                self.mean_loss = mean_loss;
+            }
+        } else {
+            self.mean_loss = -1.0;
+        }
+    }
+
     
-    // ...
+    fn backward(&mut self) {
+        // ... (previous code for memory allocation and gradient zeroing)
+
+        let b = self.batch_size;
+        let t = self.seq_len;
+        let v = self.config.vocab_size;
+        let l = self.config.num_layers;
+        let nh = self.config.num_heads;
+        let c = self.config.channels;
+
+        let params = &self.params;
+        let grads = &mut self.grads;
+        let acts = &self.acts;
+        let grads_acts = &mut self.grads_acts;
+
+        // Backward pass
+        unsafe {
+            let dloss_mean = 1.0 / (b * t) as f32;
+            for i in 0..(b * t) {
+                *grads_acts.losses.offset(i as isize) = dloss_mean;
+            }
+
+            crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, self.targets, b, t, v);
+            matmul_backward(grads_acts.lnf, grads.wte, std::ptr::null_mut(), grads_acts.logits, acts.lnf, params.wte, b, t, c, v);
+
+            let mut residual = acts.residual3.offset((l - 1) * b * t * c);
+            let mut dresidual = grads_acts.residual3.offset((l - 1) * b * t * c);
+
+            layernorm_backward(dresidual, grads.lnfw, grads.lnfb, grads_acts.lnf, residual, params.lnfw, acts.lnf_mean, acts.lnf_rstd, b, t, c);
+
+            for l in (0..l).rev() {
+                residual = if l == 0 {
+                    acts.encoded
+                } else {
+                    acts.residual3.offset((l - 1) * b * t * c)
+                };
+                dresidual = if l == 0 {
+                    grads_acts.encoded
+                } else {
+                    grads_acts.residual3.offset((l - 1) * b * t * c)
+                };
+
+                let l_ln1w = params.ln1w.offset(l * c);
+                let l_qkvw = params.qkvw.offset(l * 3 * c * c);
+                let l_attprojw = params.attprojw.offset(l * c * c);
+                let l_ln2w = params.ln2w.offset(l * c);
+                let l_fcw = params.fcw.offset(l * 4 * c * c);
+                let l_fcprojw = params.fcprojw.offset(l * c * 4 * c);
+
+                let dl_ln1w = grads.ln1w.offset(l * c);
+                let dl_ln1b = grads.ln1b.offset(l * c);
+                let dl_qkvw = grads.qkvw.offset(l * 3 * c * c);
+                let dl_qkvb = grads.qkvb.offset(l * 3 * c);
+                let dl_attprojw = grads.attprojw.offset(l * c * c);
+                let dl_attprojb = grads.attprojb.offset(l * c);
+                let dl_ln2w = grads.ln2w.offset(l * c);
+                let dl_ln2b = grads.ln2b.offset(l * c);
+                let dl_fcw = grads.fcw.offset(l * 4 * c * c);
+                let dl_fcb = grads.fcb.offset(l * 4 * c);
+                let dl_fcprojw = grads.fcprojw.offset(l * c * 4 * c);
+                let dl_fcprojb = grads.fcprojb.offset(l * c);
+
+                let l_ln1 = acts.ln1.offset(l * b * t * c);
+                let l_ln1_mean = acts.ln1_mean.offset(l * b * t);
+                let l_ln1_rstd = acts.ln1_rstd.offset(l * b * t);
+                let l_qkv = acts.qkv.offset(l * b * t * 3 * c);
+                let l_atty = acts.atty.offset(l * b * t * c);
+                let l_att = acts.att.offset(l * b * nh * t * t);
+                let l_residual2 = acts.residual2.offset(l * b * t * c);
+                let l_ln2 = acts.ln2.offset(l * b * t * c);
+                let l_ln2_mean = acts.ln2_mean.offset(l * b * t);
+                let l_ln2_rstd = acts.ln2_rstd.offset(l * b * t);
+                let l_fch = acts.fch.offset(l * b * t * 4 * c);
+                let l_fch_gelu = acts.fch_gelu.offset(l * b * t * 4 * c);
+
+                let dl_ln1 = grads_acts.ln1.offset(l * b * t * c);
+                let dl_qkv = grads_acts.qkv.offset(l * b * t * 3 * c);
+                let dl_atty = grads_acts.atty.offset(l * b * t * c);
+                let dl_preatt = grads_acts.preatt.offset(l * b * nh * t * t);
+                let dl_att = grads_acts.att.offset(l * b * nh * t * t);
+                let dl_attproj = grads_acts.attproj.offset(l * b * t * c);
+                let dl_residual2 = grads_acts.residual2.offset(l * b * t * c);
+                let dl_ln2 = grads_acts.ln2.offset(l * b * t * c);
+                let dl_fch = grads_acts.fch.offset(l * b * t * 4 * c);
+                let dl_fch_gelu = grads_acts.fch_gelu.offset(l * b * t * 4 * c);
+                let dl_fcproj = grads_acts.fcproj.offset(l * b * t * c);
+                let dl_residual3 = grads_acts.residual3.offset(l * b * t * c);
+
+                residual_backward(dl_residual2, dl_fcproj, dl_residual3, b * t * c);
+                matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, b, t, 4 * c, c);
+                gelu_backward(dl_fch, l_fch, dl_fch_gelu, b * t * 4 * c);
+                matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, b, t, c, 4 * c);
+                layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, b, t, c);
+                residual_backward(dresidual, dl_attproj, dl_residual2, b * t * c);
+                matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, b, t, c, c);
+                attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, b, t, c, nh);
+                matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, b, t, c, 3 * c);
+                layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, b, t, c);
+            }
+
+            encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, self.inputs, b, t, c);
+        }
+    }
 }
