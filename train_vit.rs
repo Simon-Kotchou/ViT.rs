@@ -372,3 +372,146 @@ impl ViT {
         }
     }
 }
+
+fn residual_forward(out: *mut f32, inp1: *const f32, inp2: *const f32, n: c_int) {
+    unsafe {
+        for i in 0..n {
+            *out.offset(i as isize) = *inp1.offset(i as isize) + *inp2.offset(i as isize);
+        }
+    }
+}
+
+fn matmul_forward(out: *mut f32, inp: *const f32, weight: *const f32, bias: *const f32, b: c_int, t: c_int, c: c_int, oc: c_int) {
+    unsafe {
+        for bt in 0..(b * t) {
+            for o in 0..oc {
+                let mut val = if !bias.is_null() { *bias.offset(o as isize) } else { 0.0 };
+                let wrow = weight.offset((o * c) as isize);
+                let inp_bt = inp.offset((bt * c) as isize);
+                for i in 0..c {
+                    val += *inp_bt.offset(i as isize) * *wrow.offset(i as isize);
+                }
+                *out.offset((bt * oc + o) as isize) = val;
+            }
+        }
+    }
+}
+
+fn attention_forward(out: *mut f32, preatt: *mut f32, att: *mut f32, inp: *const f32, b: c_int, t: c_int, c: c_int, nh: c_int) {
+    let c3 = c * 3;
+    let hs = c / nh;
+    let scale = 1.0 / (hs as f32).sqrt();
+
+    unsafe {
+        for bth in 0..(b * t * nh) {
+            let (b, t, h) = (bth / (t * nh), (bth / nh) % t, bth % nh);
+            let query_t = inp.offset(((b * t + t) * c3 + h * hs) as isize);
+            let preatt_bth = preatt.offset((bth * t) as isize);
+            let att_bth = att.offset((bth * t) as isize);
+
+            let mut maxval = -10000.0;
+            for t2 in 0..=t {
+                let key_t2 = inp.offset(((b * t + t2) * c3 + h * hs + c) as isize);
+                let mut val = 0.0;
+                for i in 0..hs {
+                    val += *query_t.offset(i as isize) * *key_t2.offset(i as isize);
+                }
+                val *= scale;
+                if val > maxval {
+                    maxval = val;
+                }
+                *preatt_bth.offset(t2 as isize) = val;
+            }
+
+            let mut expsum = 0.0;
+            for t2 in 0..=t {
+                let expv = (*preatt_bth.offset(t2 as isize) - maxval).exp();
+                expsum += expv;
+                *att_bth.offset(t2 as isize) = expv;
+            }
+            let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
+
+            for t2 in 0..t {
+                *att_bth.offset(t2 as isize) *= expsum_inv;
+            }
+
+            let out_bth = out.offset(((b * t + t) * c + h * hs) as isize);
+            for i in 0..hs {
+                *out_bth.offset(i as isize) = 0.0;
+            }
+            for t2 in 0..=t {
+                let value_t2 = inp.offset(((b * t + t2) * c3 + h * hs + c * 2) as isize);
+                let att_btht2 = *att_bth.offset(t2 as isize);
+                for i in 0..hs {
+                    *out_bth.offset(i as isize) += att_btht2 * *value_t2.offset(i as isize);
+                }
+            }
+        }
+    }
+}
+
+fn layernorm_forward(out: *mut f32, mean: *mut f32, rstd: *mut f32, inp: *const f32, weight: *const f32, bias: *const f32, b: c_int, t: c_int, c: c_int) {
+    let eps = 1e-5;
+    unsafe {
+        for bt in 0..(b * t) {
+            let x = inp.offset((bt * c) as isize);
+            let mut m = 0.0;
+            for i in 0..c {
+                m += *x.offset(i as isize);
+            }
+            m /= c as f32;
+            let mut v = 0.0;
+            for i in 0..c {
+                let xshift = *x.offset(i as isize) - m;
+                v += xshift * xshift;
+            }
+            v /= c as f32;
+            let s = 1.0 / (v + eps).sqrt();
+            let out_bt = out.offset((bt * c) as isize);
+            for i in 0..c {
+                let n = s * (*x.offset(i as isize) - m);
+                let o = n * *weight.offset(i as isize) + *bias.offset(i as isize);
+                *out_bt.offset(i as isize) = o;
+            }
+            *mean.offset(bt as isize) = m;
+            *rstd.offset(bt as isize) = s;
+        }
+    }
+}
+
+fn gelu_forward(out: *mut f32, inp: *const f32, n: c_int) {
+    let s = (2.0 / std::f32::consts::PI).sqrt();
+    unsafe {
+        for i in 0..n {
+            let x = *inp.offset(i as isize);
+            let cube = 0.044715 * x * x * x;
+            *out.offset(i as isize) = 0.5 * x * (1.0 + ((s * (x + cube)).tanh()));
+        }
+    }
+}
+
+fn softmax_forward(probs: *mut f32, logits: *const f32, b: c_int, t: c_int, v: c_int) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let logits_bt = logits.offset((bt * v) as isize);
+            let probs_bt = probs.offset((bt * v) as isize);
+
+            let mut maxval = -10000.0;
+            for i in 0..v {
+                if *logits_bt.offset(i as isize) > maxval {
+                    maxval = *logits_bt.offset(i as isize);
+                }
+            }
+
+            let mut sum = 0.0;
+            for i in 0..v {
+                *probs_bt.offset(i as isize) = (*logits_bt.offset(i as isize) - maxval).exp();
+                sum += *probs_bt.offset(i as isize);
+            }
+
+            for i in 0..v {
+                *probs_bt.offset(i as isize) /= sum;
+            }
+        }
+    }
+}
