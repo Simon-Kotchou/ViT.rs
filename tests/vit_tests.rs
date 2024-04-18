@@ -130,3 +130,69 @@ mod tests {
         ];
         assert_eq!(out, expected_out);
     }
+
+    #[test]
+    fn test_attention_forward() {
+        let b = 2;
+        let t =
+        let inp = vec![1.0; b * t * 3 * c];
+        let mut out = vec![0.0; b * t * c];
+        let mut preatt = vec![0.0; b * nh * t * t];
+        let mut att = vec![0.0; b * nh * t * t];
+    
+        attention_forward(
+            out.as_mut_ptr(),
+            preatt.as_mut_ptr(),
+            att.as_mut_ptr(),
+            inp.as_ptr(),
+            b as c_int,
+            t as c_int,
+            c as c_int,
+            nh as c_int,
+        );
+    
+        assert_ne!(out, vec![0.0; b * t * c]);
+        assert_ne!(preatt, vec![0.0; b * nh * t * t]);
+        assert_ne!(att, vec![0.0; b * nh * t * t]);
+    }
+
+    #[test]
+    fn test_layernorm_forward() {
+        let b = 2;
+        let t = 3;
+        let c = 4;
+
+        let inp = vec![1.0; b * t * c];
+        let weight = vec![2.0; c];
+        let bias = vec![3.0; c];
+        let mut out = vec![0.0; b * t * c];
+        let mut mean = vec![0.0; b * t];
+        let mut rstd = vec![0.0; b * t];
+
+        layernorm_forward(
+            out.as_mut_ptr(),
+            mean.as_mut_ptr(),
+            rstd.as_mut_ptr(),
+            inp.as_ptr(),
+            weight.as_ptr(),
+            bias.as_ptr(),
+            b as c_int,
+            t as c_int,
+            c as c_int,
+        );
+
+        assert_ne!(out, vec![0.0; b * t * c]);
+        assert_ne!(mean, vec![0.0; b * t]);
+        assert_ne!(rstd, vec![0.0; b * t]);
+    }
+
+    #[test]
+    fn test_gelu_forward() {
+        let n = 10;
+        let inp = vec![1.0; n];
+        let mut out = vec![0.0; n];
+
+        gelu_forward(out.as_mut_ptr(), inp.as_ptr(), n as c_int);
+
+        assert_ne!(out, vec![0.0; n]);
+    }
