@@ -134,7 +134,10 @@ mod tests {
     #[test]
     fn test_attention_forward() {
         let b = 2;
-        let t =
+        let b = 2;
+        let t = 3;
+        let c = 4;
+        let nh = 2;
         let inp = vec![1.0; b * t * 3 * c];
         let mut out = vec![0.0; b * t * c];
         let mut preatt = vec![0.0; b * nh * t * t];
@@ -195,4 +198,34 @@ mod tests {
         gelu_forward(out.as_mut_ptr(), inp.as_ptr(), n as c_int);
 
         assert_ne!(out, vec![0.0; n]);
+    }
+
+    #[test]
+    fn test_softmax_forward() {
+        let b = 2;
+        let t = 3;
+        let v = 4;
+
+        let logits = vec![1.0; b * t * v];
+        let mut probs = vec![0.0; b * t * v];
+
+        softmax_forward(
+            probs.as_mut_ptr(),
+            logits.as_ptr(),
+            b as c_int,
+            t as c_int,
+            v as c_int,
+        );
+
+        assert_ne!(probs, vec![0.0; b * t * v]);
+
+        // Check if the probabilities sum to 1 for each (b, t) position
+        for b in 0..b {
+            for t in 0..t {
+                let sum: f32 = probs[(b * t * v)..(b * t * v + v)]
+                    .iter()
+                    .sum();
+                assert!((sum - 1.0).abs() < 1e-6);
+            }
+        }
     }
