@@ -432,3 +432,273 @@ impl ViT {
         }
     }
 }
+
+/// Performs the residual forward pass.
+///
+/// # Arguments
+///
+/// * `out` - Output tensor pointer.
+/// * `inp1` - First input tensor pointer.
+/// * `inp2` - Second input tensor pointer.
+/// * `n` - Number of elements in the tensors.
+fn residual_forward(out: *mut f32, inp1: *const f32, inp2: *const f32, n: usize) {
+    unsafe {
+        let out_slice = std::slice::from_raw_parts_mut(out, n);
+        let inp1_slice = std::slice::from_raw_parts(inp1, n);
+        let inp2_slice = std::slice::from_raw_parts(inp2, n);
+
+        for i in 0..n {
+            out_slice[i] = inp1_slice[i] + inp2_slice[i];
+        }
+    }
+}
+
+/// Performs the matrix multiplication forward pass.
+///
+/// # Arguments
+///
+/// * `out` - Output tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `weight` - Weight tensor pointer.
+/// * `bias` - Bias tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `c` - Input channels.
+/// * `oc` - Output channels.
+fn matmul_forward(out: *mut f32, inp: *const f32, weight: *const f32, bias: *const f32, b: usize, t: usize, c: usize, oc: usize) {
+    unsafe {
+        for bt in 0..(b * t) {
+            for o in 0..oc {
+                let mut val = if !bias.is_null() { *bias.add(o) } else { 0.0 };
+                let wrow = weight.add(o * c);
+                let inp_bt = inp.add(bt * c);
+                for i in 0..c {
+                    val += *inp_bt.add(i) * *wrow.add(i);
+                }
+                *out.add(bt * oc + o) = val;
+            }
+        }
+    }
+}
+
+/// Performs the multi-head self-attention forward pass.
+///
+/// # Arguments
+///
+/// * `out` - Output tensor pointer.
+/// * `preatt` - Pre-attention tensor pointer.
+/// * `att` - Attention tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `c` - Input channels.
+/// * `nh` - Number of attention heads.
+fn attention_forward(out: *mut f32, preatt: *mut f32, att: *mut f32, inp: *const f32, b: usize, t: usize, c: usize, nh: usize) {
+    let c3 = c * 3;
+    let hs = c / nh;
+    let scale = 1.0 / (hs as f32).sqrt();
+
+    unsafe {
+        for bth in 0..(b * t * nh) {
+            let (b, t, h) = (bth / (t * nh), (bth / nh) % t, bth % nh);
+            let query_t = inp.add((b * t + t) * c3 + h * hs);
+            let preatt_bth = preatt.add(bth * t);
+            let att_bth = att.add(bth * t);
+
+            let mut maxval = -10000.0;
+            for t2 in 0..=t {
+                let key_t2 = inp.add((b * t + t2) * c3 + h * hs + c);
+                let mut val = 0.0;
+                for i in 0..hs {
+                    val += *query_t.add(i) * *key_t2.add(i);
+                }
+                val *= scale;
+                if val > maxval {
+                    maxval = val;
+                }
+                *preatt_bth.add(t2) = val;
+            }
+
+            let mut expsum = 0.0;
+            for t2 in 0..=t {
+                let expv = (*preatt_bth.add(t2) - maxval).exp();
+                expsum += expv;
+                *att_bth.add(t2) = expv;
+            }
+            let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
+
+            for t2 in 0..t {
+                *att_bth.add(t2) *= expsum_inv;
+            }
+
+            let out_bth = out.add((b * t + t) * c + h * hs);
+            for i in 0..hs {
+                *out_bth.add(i) = 0.0;
+            }
+            for t2 in 0..=t {
+                let value_t2 = inp.add((b * t + t2) * c3 + h * hs + c * 2);
+                let att_btht2 = *att_bth.add(t2);
+                for i in 0..hs {
+                    *out_bth.add(i) += att_btht2 * *value_t2.add(i);
+                }
+            }
+        }
+    }
+}
+
+/// Performs the layer normalization forward pass.
+///
+/// # Arguments
+///
+/// * `out` - Output tensor pointer.
+/// * `mean` - Mean tensor pointer.
+/// * `rstd` - Reciprocal standard deviation tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `weight` - Weight tensor pointer.
+/// * `bias` - Bias tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `c` - Input channels.
+fn layernorm_forward(out: *mut f32, mean: *mut f32, rstd: *mut f32, inp: *const f32, weight: *const f32, bias: *const f32, b: usize, t: usize, c: usize) {
+    let eps = 1e-5;
+    unsafe {
+        for bt in 0..(b * t) {
+            let x = inp.add(bt * c);
+            let mut m = 0.0;
+            for i in 0..c {
+                m += *x.add(i);
+            }
+            m /= c as f32;
+            let mut v = 0.0;
+            for i in 0..c {
+                let xshift = *x.add(i) - m;
+                v += xshift * xshift;
+            }
+            v /= c as f32;
+            let s = 1.0 / (v + eps).sqrt();
+            let out_bt = out.add(bt * c);
+            for i in 0..c {
+                let n = s * (*x.add(i) - m);
+                let o = n * *weight.add(i) + *bias.add(i);
+                *out_bt.add(i) = o;
+            }
+            *mean.add(bt) = m;
+            *rstd.add(bt) = s;
+        }
+    }
+}
+
+/// Performs the GELU activation forward pass.
+///
+/// # Arguments
+///
+/// * `out` - Output tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `n` - Number of elements in the tensors.
+fn gelu_forward(out: *mut f32, inp: *const f32, n: usize) {
+    let s = (2.0 / std::f32::consts::PI).sqrt();
+    unsafe {
+        for i in 0..n {
+            let x = *inp.add(i);
+            let cube = 0.044715 * x * x * x;
+            *out.add(i) = 0.5 * x * (1.0 + ((s * (x + cube)).tanh()));
+        }
+    }
+}
+
+/// Performs the softmax activation forward pass.
+///
+/// # Arguments
+///
+/// * `probs` - Probability tensor pointer.
+/// * `logits` - Logit tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `v` - Vocabulary size.
+fn softmax_forward(probs: *mut f32, logits: *const f32, b: usize, t: usize, v: usize) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let logits_bt = logits.add(bt * v);
+            let probs_bt = probs.add(bt * v);
+
+            let mut maxval = -10000.0;
+            for i in 0..v {
+                if *logits_bt.add(i) > maxval {
+                    maxval = *logits_bt.add(i);
+                }
+            }
+
+            let mut sum = 0.0;
+            for i in 0..v {
+                *probs_bt.add(i) = (*logits_bt.add(i) - maxval).exp();
+                sum += *probs_bt.add(i);
+            }
+
+            for i in 0..v {
+                *probs_bt.add(i) /= sum;
+            }
+        }
+    }
+}
+
+// Backward functions
+
+/// Performs the residual backward pass.
+///
+/// # Arguments
+///
+/// * `dinp1` - Gradient of the first input tensor pointer.
+/// * `dinp2` - Gradient of the second input tensor pointer.
+/// * `dout` - Gradient of the output tensor pointer.
+/// * `n` - Number of elements in the tensors.
+fn residual_backward(dinp1: *mut f32, dinp2: *mut f32, dout: *const f32, n: usize) {
+    unsafe {
+        for i in 0..n {
+            *dinp1.add(i) += *dout.add(i);
+            *dinp2.add(i) += *dout.add(i);
+        }
+    }
+}
+
+/// Performs the matrix multiplication backward pass.
+///
+/// # Arguments
+///
+/// * `dinp` - Gradient of the input tensor pointer.
+/// * `dweight` - Gradient of the weight tensor pointer.
+/// * `dbias` - Gradient of the bias tensor pointer.
+/// * `dout` - Gradient of the output tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `weight` - Weight tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `c` - Input channels.
+/// * `oc` - Output channels.
+fn matmul_backward(dinp: *mut f32, dweight: *mut f32, dbias: *mut f32, dout: *const f32, inp: *const f32, weight: *const f32, b: usize, t: usize, c: usize, oc: usize) {
+    unsafe {
+        for bt in 0..(b * t) {
+            for o in 0..oc {
+                let dout_bt = dout.add(bt * oc + o);
+                let wrow = weight.add(o * c);
+                let dinp_bt = dinp.add(bt * c);
+                for i in 0..c {
+                    *dinp_bt.add(i) += *wrow.add(i) * *dout_bt;
+                }
+            }
+        }
+
+        for o in 0..oc {
+            for bt in 0..(b * t) {
+                let dout_bt = dout.add(bt * oc + o);
+                let inp_bt = inp.add(bt * c);
+                let dwrow = dweight.add(o * c);
+                if !dbias.is_null() {
+                    *dbias.add(o) += *dout_bt;
+                }
+                for i in 0..c {
+                    *dwrow.add(i) += *inp_bt.add(i) * *dout_bt;
+                }
+            }
+        }
+    }
+}
