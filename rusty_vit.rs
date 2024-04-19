@@ -702,3 +702,218 @@ fn matmul_backward(dinp: *mut f32, dweight: *mut f32, dbias: *mut f32, dout: *co
         }
     }
 }
+
+/// Performs the layer normalization backward pass.
+///
+/// # Arguments
+///
+/// * `dinp` - Gradient of the input tensor pointer.
+/// * `dweight` - Gradient of the weight tensor pointer.
+/// * `dbias` - Gradient of the bias tensor pointer.
+/// * `dout` - Gradient of the output tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `weight` - Weight tensor pointer.
+/// * `mean` - Mean tensor pointer.
+/// * `rstd` - Reciprocal standard deviation tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `c` - Input channels.
+fn layernorm_backward(
+    dinp: *mut f32,
+    dweight: *mut f32,
+    dbias: *mut f32,
+    dout: *const f32,
+    inp: *const f32,
+    weight: *const f32,
+    mean: *const f32,
+    rstd: *const f32,
+    b: usize,
+    t: usize,
+    c: usize,
+) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let dout_bt = dout.add(bt * c);
+            let inp_bt = inp.add(bt * c);
+            let dinp_bt = dinp.add(bt * c);
+            let mean_bt = *mean.add(bt);
+            let rstd_bt = *rstd.add(bt);
+
+            let mut dnorm_mean = 0.0;
+            let mut dnorm_norm_mean = 0.0;
+            for i in 0..c {
+                let norm_bti = (inp_bt.add(i) - mean_bt) * rstd_bt;
+                let dnorm_i = *weight.add(i) * *dout_bt.add(i);
+                dnorm_mean += dnorm_i;
+                dnorm_norm_mean += dnorm_i * norm_bti;
+            }
+            dnorm_mean /= c as f32;
+            dnorm_norm_mean /= c as f32;
+
+            for i in 0..c {
+                let norm_bti = (*inp_bt.add(i) - mean_bt) * rstd_bt;
+                let dnorm_i = *weight.add(i) * *dout_bt.add(i);
+                *dbias.add(i) += *dout_bt.add(i);
+                *dweight.add(i) += norm_bti * *dout_bt.add(i);
+                let mut dval = 0.0;
+                dval += dnorm_i;
+                dval -= dnorm_mean;
+                dval -= norm_bti * dnorm_norm_mean;
+                dval *= rstd_bt;
+                *dinp_bt.add(i) += dval;
+            }
+        }
+    }
+}
+
+/// Performs the GELU activation backward pass.
+///
+/// # Arguments
+///
+/// * `dinp` - Gradient of the input tensor pointer.
+/// * `inp` - Input tensor pointer.
+/// * `dout` - Gradient of the output tensor pointer.
+/// * `n` - Number of elements in the tensors.
+fn gelu_backward(dinp: *mut f32, inp: *const f32, dout: *const f32, n: usize) {
+    let s = (2.0 / std::f32::consts::PI).sqrt();
+    unsafe {
+        for i in 0..n {
+            let x = *inp.add(i);
+            let cube = 0.044715 * x * x * x;
+            let tanh_arg = s * (x + cube);
+            let tanh_out = tanh_arg.tanh();
+            let coshf_out = (2.0 * tanh_arg).cosh();
+            let sech_out = 1.0 / (coshf_out * coshf_out);
+            let local_grad = 0.5 * (1.0 + tanh_out) + x * 0.5 * sech_out * s * (1.0 + 3.0 * 0.044715 * x * x);
+            *dinp.add(i) += local_grad * *dout.add(i);
+        }
+    }
+}
+
+/// Performs the softmax activation backward pass.
+///
+/// # Arguments
+///
+/// * `dinp` - Gradient of the input tensor pointer.
+/// * `dout` - Gradient of the output tensor pointer.
+/// * `probs` - Probability tensor pointer.
+/// * `b` - Batch size.
+/// * `t` - Sequence length.
+/// * `v` - Vocabulary size.
+fn softmax_backward(dinp: *mut f32, dout: *const f32, probs: *const f32, b: usize, t: usize, v: usize) {
+    unsafe {
+        for bt in 0..(b * t) {
+            let dout_bt = dout.add(bt * v);
+            let probs_bt = probs.add(bt * v);
+            let dinp_bt = dinp.add(bt * v);
+            for i in 0..v {
+                let p = *probs_bt.add(i);
+                for j in 0..v {
+                    let indicator = if i == j { 1.0 } else { 0.0 };
+                    *dinp_bt.add(i) += (p - indicator) * *dout_bt.add(j);
+                }
+            }
+        }
+    }
+}
+
+// Utility functions
+
+/// Initializes the model parameters.
+///
+/// # Arguments
+///
+/// * `params` - Parameter tensors.
+/// * `config` - Model configuration.
+fn init_parameters(params: &mut ParameterTensors, config: &ViTConfig) {
+    let v = config.vocab_size;
+    let c = config.channels;
+    let l = config.num_layers;
+
+    unsafe {
+        for i in 0..(v * c) {
+            *params.wte.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(config.max_seq_len * c) {
+            *params.wpe.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c) {
+            *params.ln1w.add(i) = 1.0;
+            *params.ln2w.add(i) = 1.0;
+        }
+
+        for i in 0..(l * 3 * c * c) {
+            *params.qkvw.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c * c) {
+            *params.attprojw.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * 4 * c * c) {
+            *params.fcw.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..(l * c * 4 * c) {
+            *params.fcprojw.add(i) = rand::random::<f32>() * 0.02;
+        }
+
+        for i in 0..c {
+            *params.lnfw.add(i) = 1.0;
+        }
+    }
+}
+
+/// Saves the model parameters to a checkpoint file.
+///
+/// # Arguments
+///
+/// * `params` - Parameter tensors.
+/// * `config` - Model configuration.
+/// * `filepath` - Path to the checkpoint file.
+fn save_checkpoint(params: &ParameterTensors, config: &ViTConfig, filepath: &str) {
+    let mut file = File::create(filepath).unwrap();
+    unsafe {
+        file.write_all(std::slice::from_raw_parts(
+            params.wte as *const u8,
+            config.vocab_size * config.channels * std::mem::size_of::<f32>(),
+        ))
+        .unwrap();
+        // Save other parameters similarly
+    }
+}
+
+/// Loads the model parameters from a checkpoint file.
+///
+/// # Arguments
+///
+/// * `params` - Parameter tensors.
+/// * `config` - Model configuration.
+/// * `filepath` - Path to the checkpoint file.
+fn load_checkpoint(params: &mut ParameterTensors, config: &ViTConfig, filepath: &str) {
+    let mut file = File::open(filepath).unwrap();
+    unsafe {
+        file.read_exact(std::slice::from_raw_parts_mut(
+            params.wte as *mut u8,
+            config.vocab_size * config.channels * std::mem::size_of::<f32>(),
+        ))
+        .unwrap();
+        // Load other parameters similarly
+    }
+}
+
+/// Performs the optimizer step to update the model parameters.
+///
+/// # Arguments
+///
+/// * `model` - ViT model.
+/// * `learning_rate` - Learning rate for parameter updates.
+fn optimizer_step(model: &mut ViT, learning_rate: f32) {
+    unsafe {
+        for i in 0..model.num_parameters {
+            *model.params_memory.add(i) -= learning_rate * *model.grads_memory.add(i);
+        }
+    }
+}
