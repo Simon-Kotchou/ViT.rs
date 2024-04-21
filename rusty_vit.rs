@@ -817,6 +817,26 @@ fn softmax_backward(dinp: *mut f32, dout: *const f32, probs: *const f32, b: usiz
     }
 }
 
+fn crossentropy_forward(out: *mut f32, logits: *const f32, targets: *const c_int, b: usize, nc: usize) {
+    unsafe {
+        for i in 0..b {
+            let target = *targets.add(i) as usize;
+            *out.add(i) = -*logits.add(i * nc + target);
+        }
+    }
+}
+
+fn crossentropy_backward(dlogits: *mut f32, logits: *const f32, targets: *const c_int, b: usize, nc: usize) {
+    unsafe {
+        for i in 0..b {
+            let target = *targets.add(i) as usize;
+            for j in 0..nc {
+                *dlogits.add(i * nc + j) = if j == target { -*logits.add(i * nc + j) } else { 0.0 };
+            }
+        }
+    }
+}
+
 // Utility functions
 
 /// Initializes the model parameters.
