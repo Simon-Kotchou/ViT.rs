@@ -60,27 +60,18 @@ struct ActivationTensors {
     losses: Vec<f32>,
 }
 
-/// Represents the ViT model.
 struct ViT {
     config: ViTConfig,
     params: ParameterTensors,
-    param_sizes: [usize; NUM_PARAMETER_TENSORS],
-    params_memory: *mut f32,
-    num_parameters: usize,
     grads: ParameterTensors,
-    grads_memory: *mut f32,
-    m_memory: *mut f32,
-    v_memory: *mut f32,
+    m: Vec<f32>,
+    v: Vec<f32>,
     acts: ActivationTensors,
-    act_sizes: [usize; NUM_ACTIVATION_TENSORS],
-    acts_memory: *mut f32,
-    num_activations: usize,
     grads_acts: ActivationTensors,
-    grads_acts_memory: *mut f32,
     batch_size: usize,
     seq_len: usize,
-    inputs: *mut c_int,
-    targets: *mut c_int,
+    inputs: Vec<usize>,
+    targets: Vec<usize>,
     mean_loss: f32,
 }
 
