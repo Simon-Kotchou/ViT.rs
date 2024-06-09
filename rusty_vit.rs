@@ -1,61 +1,11 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
-use std::os::raw::c_int;
+use std::slice;
 
 const NUM_PARAMETER_TENSORS: usize = 16;
 const NUM_ACTIVATION_TENSORS: usize = 23;
 
-/// Represents the parameter tensors of the ViT model.
-#[repr(C)]
-struct ParameterTensors {
-    wte: *mut f32,
-    wpe: *mut f32,
-    ln1w: *mut f32,
-    ln1b: *mut f32,
-    qkvw: *mut f32,
-    qkvb: *mut f32,
-    attprojw: *mut f32,
-    attprojb: *mut f32,
-    ln2w: *mut f32,
-    ln2b: *mut f32,
-    fcw: *mut f32,
-    fcb: *mut f32,
-    fcprojw: *mut f32,
-    fcprojb: *mut f32,
-    lnfw: *mut f32,
-    lnfb: *mut f32,
-}
-
-/// Represents the activation tensors of the ViT model.
-#[repr(C)]
-struct ActivationTensors {
-    encoded: *mut f32,
-    ln1: *mut f32,
-    ln1_mean: *mut f32,
-    ln1_rstd: *mut f32,
-    qkv: *mut f32,
-    atty: *mut f32,
-    preatt: *mut f32,
-    att: *mut f32,
-    attproj: *mut f32,
-    residual2: *mut f32,
-    ln2: *mut f32,
-    ln2_mean: *mut f32,
-    ln2_rstd: *mut f32,
-    fch: *mut f32,
-    fch_gelu: *mut f32,
-    fcproj: *mut f32,
-    residual3: *mut f32,
-    lnf: *mut f32,
-    lnf_mean: *mut f32,
-    lnf_rstd: *mut f32,
-    logits: *mut f32,
-    probs: *mut f32,
-    losses: *mut f32,
-}
-
-/// Represents the configuration of the ViT model.
 #[derive(Debug, Clone, Copy)]
 struct ViTConfig {
     max_seq_len: usize,
@@ -63,6 +13,51 @@ struct ViTConfig {
     num_layers: usize,
     num_heads: usize,
     channels: usize,
+}
+
+struct ParameterTensors {
+    wte: Vec<f32>,
+    wpe: Vec<f32>,
+    ln1w: Vec<f32>,
+    ln1b: Vec<f32>,
+    qkvw: Vec<f32>,
+    qkvb: Vec<f32>,
+    attprojw: Vec<f32>,
+    attprojb: Vec<f32>,
+    ln2w: Vec<f32>,
+    ln2b: Vec<f32>,
+    fcw: Vec<f32>,
+    fcb: Vec<f32>,
+    fcprojw: Vec<f32>,
+    fcprojb: Vec<f32>,
+    lnfw: Vec<f32>,
+    lnfb: Vec<f32>,
+}
+
+struct ActivationTensors {
+    encoded: Vec<f32>,
+    ln1: Vec<f32>,
+    ln1_mean: Vec<f32>,
+    ln1_rstd: Vec<f32>,
+    qkv: Vec<f32>,
+    atty: Vec<f32>,
+    preatt: Vec<f32>,
+    att: Vec<f32>,
+    attproj: Vec<f32>,
+    residual2: Vec<f32>,
+    ln2: Vec<f32>,
+    ln2_mean: Vec<f32>,
+    ln2_rstd: Vec<f32>,
+    fch: Vec<f32>,
+    fch_gelu: Vec<f32>,
+    fcproj: Vec<f32>,
+    residual3: Vec<f32>,
+    lnf: Vec<f32>,
+    lnf_mean: Vec<f32>,
+    lnf_rstd: Vec<f32>,
+    logits: Vec<f32>,
+    probs: Vec<f32>,
+    losses: Vec<f32>,
 }
 
 /// Represents the ViT model.
