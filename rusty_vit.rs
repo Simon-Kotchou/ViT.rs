@@ -266,111 +266,85 @@ impl ViT {
     /// * `targets` - Target tensor pointer.
     /// * `b` - Batch size.
     /// * `t` - Sequence length.
-    fn forward(&mut self, inputs: *const c_int, targets: *const c_int, b: usize, t: usize) {
-        // ... (previous code for memory allocation and input/target copying)
+    fn forward(&mut self, inputs: &[usize], targets: &[usize], b: usize, t: usize) {
+        self.batch_size = b;
+        self.seq_len = t;
+        self.inputs = inputs.to_vec();
+        self.targets = targets.to_vec();
 
-        let params = &self.params;
+        let c = self.config.channels;
+        let l = self.config.num_layers;
+        let nh = self.config.num_heads;
+        let v = self.config.vocab_size;
+
         let acts = &mut self.acts;
 
-        // Forward pass
-        unsafe {
-            // Perform the encoder forward pass.
-            // This operation encodes the input sequence using the word and position embeddings.
-            encoder_forward(acts.encoded, inputs, params.wte, params.wpe, b, t, self.config.channels);
+        encoder_forward(&mut acts.encoded, &self.inputs, &self.params.wte, &self.params.wpe, b, t, c);
 
-            let mut residual: *mut f32 = std::ptr::null_mut();
-            for l in 0..self.config.num_layers {
-                residual = if l == 0 {
-                    acts.encoded
-                } else {
-                    acts.residual3.add((l - 1) * b * t * self.config.channels)
-                };
+        let mut residual: &mut [f32] = &mut [];
+        for l in 0..l {
+            residual = if l == 0 {
+                &mut acts.encoded
+            } else {
+                &mut acts.residual3[(l - 1) * b * t * c..(l * b * t * c)]
+            };
 
-                let l_ln1w = params.ln1w.add(l * self.config.channels);
-                let l_ln1b = params.ln1b.add(l * self.config.channels);
-                let l_qkvw = params.qkvw.add(l * 3 * self.config.channels * self.config.channels);
-                let l_qkvb = params.qkvb.add(l * 3 * self.config.channels);
-                let l_attprojw = params.attprojw.add(l * self.config.channels * self.config.channels);
-                let l_attprojb = params.attprojb.add(l * self.config.channels);
-                let l_ln2w = params.ln2w.add(l * self.config.channels);
-                let l_ln2b = params.ln2b.add(l * self.config.channels);
-                let l_fcw = params.fcw.add(l * 4 * self.config.channels * self.config.channels);
-                let l_fcb = params.fcb.add(l * 4 * self.config.channels);
-                let l_fcprojw = params.fcprojw.add(l * self.config.channels * 4 * self.config.channels);
-                let l_fcprojb = params.fcprojb.add(l * self.config.channels);
+            let l_ln1w = &self.params.ln1w[l * c..(l + 1) * c];
+            let l_ln1b = &self.params.ln1b[l * c..(l + 1) * c];
+            let l_qkvw = &self.params.qkvw[l * 3 * c * c..(l + 1) * 3 * c * c];
+            let l_qkvb = &self.params.qkvb[l * 3 * c..(l + 1) * 3 * c];
+            let l_attprojw = &self.params.attprojw[l * c * c..(l + 1) * c * c];
+            let l_attprojb = &self.params.attprojb[l * c..(l + 1) * c];
+            let l_ln2w = &self.params.ln2w[l * c..(l + 1) * c];
+            let l_ln2b = &self.params.ln2b[l * c..(l + 1) * c];
+            let l_fcw = &self.params.fcw[l * 4 * c * c..(l + 1) * 4 * c * c];
+            let l_fcb = &self.params.fcb[l * 4 * c..(l + 1) * 4 * c];
+            let l_fcprojw = &self.params.fcprojw[l * c * 4 * c..(l + 1) * c * 4 * c];
+            let l_fcprojb = &self.params.fcprojb[l * c..(l + 1) * c];
 
-                let l_ln1 = acts.ln1.add(l * b * t * self.config.channels);
-                let l_ln1_mean = acts.ln1_mean.add(l * b * t);
-                let l_ln1_rstd = acts.ln1_rstd.add(l * b * t);
-                let l_qkv = acts.qkv.add(l * b * t * 3 * self.config.channels);
-                let l_atty = acts.atty.add(l * b * t * self.config.channels);
-                let l_preatt = acts.preatt.add(l * b * self.config.num_heads * t * t);
-                let l_att = acts.att.add(l * b * self.config.num_heads * t * t);
-                let l_attproj = acts.attproj.add(l * b * t * self.config.channels);
-                let l_residual2 = acts.residual2.add(l * b * t * self.config.channels);
-                let l_ln2 = acts.ln2.add(l * b * t * self.config.channels);
-                let l_ln2_mean = acts.ln2_mean.add(l * b * t);
-                let l_ln2_rstd = acts.ln2_rstd.add(l * b * t);
-                let l_fch = acts.fch.add(l * b * t * 4 * self.config.channels);
-                let l_fch_gelu = acts.fch_gelu.add(l * b * t * 4 * self.config.channels);
-                let l_fcproj = acts.fcproj.add(l * b * t * self.config.channels);
-                let l_residual3 = acts.residual3.add(l * b * t * self.config.channels);
+            let l_ln1 = &mut acts.ln1[l * b * t * c..(l + 1) * b * t * c];
+            let l_ln1_mean = &mut acts.ln1_mean[l * b * t..(l + 1) * b * t];
+            let l_ln1_rstd = &mut acts.ln1_rstd[l * b * t..(l + 1) * b * t];
+            let l_qkv = &mut acts.qkv[l * b * t * 3 * c..(l + 1) * b * t * 3 * c];
+            let l_atty = &mut acts.atty[l * b * t * c..(l + 1) * b * t * c];
+            let l_preatt = &mut acts.preatt[l * b * nh * t * t..(l + 1) * b * nh * t * t];
+            let l_att = &mut acts.att[l * b * nh * t * t..(l + 1) * b * nh * t * t];
+            let l_attproj = &mut acts.attproj[l * b * t * c..(l + 1) * b * t * c];
+            let l_residual2 = &mut acts.residual2[l * b * t * c..(l + 1) * b * t * c];
+            let l_ln2 = &mut acts.ln2[l * b * t * c..(l + 1) * b * t * c];
+            let l_ln2_mean = &mut acts.ln2_mean[l * b * t..(l + 1) * b * t];
+            let l_ln2_rstd = &mut acts.ln2_rstd[l * b * t..(l + 1) * b * t];
+            let l_fch = &mut acts.fch[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+            let l_fch_gelu = &mut acts.fch_gelu[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+            let l_fcproj = &mut acts.fcproj[l * b * t * c..(l + 1) * b * t * c];
+            let l_residual3 = &mut acts.residual3[l * b * t * c..(l + 1) * b * t * c];
 
-                // Perform layer normalization on the residual.
-                layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, b, t, self.config.channels);
-                
-                // Perform matrix multiplication to compute query, key, and value tensors.
-                matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, b, t, self.config.channels, 3 * self.config.channels);
-                
-                // Perform multi-head self-attention.
-                attention_forward(l_atty, l_preatt, l_att, l_qkv, b, t, self.config.channels, self.config.num_heads);
-                
-                // Perform matrix multiplication to project the attention output.
-                matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, b, t, self.config.channels, self.config.channels);
-                
-                // Compute the residual connection.
-                residual_forward(l_residual2, residual, l_attproj, b * t * self.config.channels);
-                
-                // Perform layer normalization on the residual.
-                layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, b, t, self.config.channels);
-                
-                // Perform matrix multiplication for the feed-forward layer.
-                matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, b, t, self.config.channels, 4 * self.config.channels);
-                
-                // Apply the GELU activation function.
-                gelu_forward(l_fch_gelu, l_fch, b * t * 4 * self.config.channels);
-                
-                // Perform matrix multiplication to project the feed-forward output.
-                matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, b, t, 4 * self.config.channels, self.config.channels);
-                
-                // Compute the residual connection.
-                residual_forward(l_residual3, l_residual2, l_fcproj, b * t * self.config.channels);
-            }
-
-            residual = acts.residual3.add((self.config.num_layers - 1) * b * t * self.config.channels);
-            
-            // Perform layer normalization on the final residual.
-            layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, b, t, self.config.channels);
-            
-            // Perform matrix multiplication to compute the logits.
-            matmul_forward(acts.logits, acts.lnf, params.wte, std::ptr::null_mut(), b, t, self.config.channels, self.config.vocab_size);
-            
-            // Apply the softmax function to compute the probabilities.
-            softmax_forward(acts.probs, acts.logits, b, t, self.config.vocab_size);
+            layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, b, t, c);
+            matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, b, t, c, 3 * c);
+            attention_forward(l_atty, l_preatt, l_att, l_qkv, b, t, c, nh);
+            matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, b, t, c, c);
+            residual_forward(l_residual2, residual, l_attproj, b * t * c);
+            layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, b, t, c);
+            matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, b, t, c, 4 * c);
+            gelu_forward(l_fch_gelu, l_fch, b * t * 4 * c);
+            matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, b, t, 4 * c, c);
+            residual_forward(l_residual3, l_residual2, l_fcproj, b * t * c);
         }
 
-        if !targets.is_null() {
-            unsafe {
-                // Compute the cross-entropy loss.
-                crossentropy_forward(acts.losses, acts.probs, targets, b, t, self.config.vocab_size);
+        residual = &mut acts.residual3[(l - 1) * b * t * c..];
+        layernorm_forward(&mut acts.lnf, &mut acts.lnf_mean, &mut acts.lnf_rstd, residual, &self.params.lnfw, &self.params.lnfb, b, t, c);
+        matmul_forward(&mut acts.logits, &acts.lnf, &self.params.wte, &[], b, t, c, v);
+        softmax_forward(&mut acts.probs, &acts.logits, b, t, v);
 
-                let mut mean_loss = 0.0;
-                for i in 0..(b * t) {
-                    mean_loss += *acts.losses.add(i);
-                }
-                mean_loss /= (b * t) as f32;
-                self.mean_loss = mean_loss;
+        if !targets.is_empty() {
+            crossentropy_forward(&mut acts.losses, &acts.probs, &self.targets, b, t, v);
+
+            let mut mean_loss = 0.0;
+            for i in 0..(b * t) {
+                mean_loss += acts.losses[i];
             }
+            mean_loss /= (b * t) as f32;
+            self.mean_loss = mean_loss;
         } else {
             self.mean_loss = -1.0;
         }
