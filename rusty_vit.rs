@@ -76,29 +76,24 @@ struct ViT {
 }
 
 impl ViT {
-    /// Builds a ViT model from a checkpoint file.
-    ///
-    /// # Arguments
-    ///
-    /// * `checkpoint_path` - Path to the checkpoint file.
-    fn build_from_checkpoint(checkpoint_path: &str) -> Self {
-        let mut model_file = File::open(checkpoint_path).expect("Error opening model file");
+    fn build_from_checkpoint(checkpoint_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut model_file = File::open(checkpoint_path)?;
         let mut model_header = [0; 256];
-        model_file.read_exact(&mut model_header).expect("Error reading model header");
-        
+        model_file.read_exact(&mut model_header)?;
+
         let max_seq_len = model_header[2] as usize;
         let vocab_size = model_header[3] as usize;
         let num_layers = model_header[4] as usize;
         let num_heads = model_header[5] as usize;
         let channels = model_header[6] as usize;
-        
+
         println!("[ViT]");
         println!("max_seq_len: {}", max_seq_len);
         println!("vocab_size: {}", vocab_size);
         println!("num_layers: {}", num_layers);
         println!("num_heads: {}", num_heads);
         println!("channels: {}", channels);
-        
+
         let config = ViTConfig {
             max_seq_len,
             vocab_size,
@@ -106,78 +101,161 @@ impl ViT {
             num_heads,
             channels,
         };
-        
-        let mut param_sizes = [0; NUM_PARAMETER_TENSORS];
-        param_sizes[0] = vocab_size * channels;
-        param_sizes[1] = max_seq_len * channels;
-        param_sizes[2] = num_layers * channels;
-        param_sizes[3] = num_layers * channels;
-        param_sizes[4] = num_layers * (3 * channels) * channels;
-        param_sizes[5] = num_layers * (3 * channels);
-        param_sizes[6] = num_layers * channels * channels;
-        param_sizes[7] = num_layers * channels;
-        param_sizes[8] = num_layers * channels;
-        param_sizes[9] = num_layers * channels;
-        param_sizes[10] = num_layers * (4 * channels) * channels;
-        param_sizes[11] = num_layers * (4 * channels);
-        param_sizes[12] = num_layers * channels * (4 * channels);
-        param_sizes[13] = num_layers * channels;
-        param_sizes[14] = channels;
-        param_sizes[15] = channels;
-        
+
+        let param_sizes = [
+            vocab_size * channels,
+            max_seq_len * channels,
+            num_layers * channels,
+            num_layers * channels,
+            num_layers * 3 * channels * channels,
+            num_layers * 3 * channels,
+            num_layers * channels * channels,
+            num_layers * channels,
+            num_layers * channels,
+            num_layers * channels,
+            num_layers * 4 * channels * channels,
+            num_layers * 4 * channels,
+            num_layers * channels * 4 * channels,
+            num_layers * channels,
+            channels,
+            channels,
+        ];
+
         let num_parameters: usize = param_sizes.iter().sum();
         println!("num_parameters: {}", num_parameters);
-        
-        let params_memory = unsafe {
-            let layout = std::alloc::Layout::array::<f32>(num_parameters).unwrap();
-            std::alloc::alloc(layout) as *mut f32
-        };
-        
-        model_file.seek(SeekFrom::Start(1024)).expect("Error seeking in model file");
-        let mut params_memory_slice = unsafe { std::slice::from_raw_parts_mut(params_memory, num_parameters) };
-        model_file.read_exact(bytemuck::cast_slice_mut(params_memory_slice)).expect("Error reading model parameters");
-        
+
+        let mut params_memory = vec![0.0; num_parameters];
+        model_file.seek(SeekFrom::Start(1024))?;
+        model_file.read_exact(bytemuck::cast_slice_mut(&mut params_memory))?;
+
         let params = ParameterTensors {
-            wte: params_memory,
-            wpe: unsafe { params_memory.add(param_sizes[0]) },
-            ln1w: unsafe { params_memory.add(param_sizes[0] + param_sizes[1]) },
-            ln1b: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2]) },
-            qkvw: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3]) },
-            qkvb: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4]) },
-            attprojw: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5]) },
-            attprojb: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6]) },
-            ln2w: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7]) },
-            ln2b: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8]) },
-            fcw: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9]) },
-            fcb: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10]) },
-            fcprojw: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11]) },
-            fcprojb: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12]) },
-            lnfw: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13]) },
-            lnfb: unsafe { params_memory.add(param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13] + param_sizes[14]) },
+            wte: params_memory[..param_sizes[0]].to_vec(),
+            wpe: params_memory[param_sizes[0]..param_sizes[0] + param_sizes[1]].to_vec(),
+            ln1w: params_memory[param_sizes[0] + param_sizes[1]..param_sizes[0] + param_sizes[1] + param_sizes[2]].to_vec(),
+            ln1b: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3]].to_vec(),
+            qkvw: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4]].to_vec(),
+            qkvb: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5]].to_vec(),
+            attprojw: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6]].to_vec(),
+            attprojb: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7]].to_vec(),
+            ln2w: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8]].to_vec(),
+            ln2b: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9]].to_vec(),
+            fcw: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10]].to_vec(),
+            fcb: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11]].to_vec(),
+            fcprojw: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12]].to_vec(),
+            fcprojb: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13]].to_vec(),
+            lnfw: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13]..param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13] + param_sizes[14]].to_vec(),
+            lnfb: params_memory[param_sizes[0] + param_sizes[1] + param_sizes[2] + param_sizes[3] + param_sizes[4] + param_sizes[5] + param_sizes[6] + param_sizes[7] + param_sizes[8] + param_sizes[9] + param_sizes[10] + param_sizes[11] + param_sizes[12] + param_sizes[13] + param_sizes[14]..].to_vec(),
         };
-        
-        Self {
+
+        let act_sizes = [
+            max_seq_len * channels,
+            num_layers * max_seq_len * channels,
+            num_layers * max_seq_len,
+            num_layers * max_seq_len,
+            num_layers * max_seq_len * 3 * channels,
+            num_layers * max_seq_len * channels,
+            num_layers * num_heads * max_seq_len * max_seq_len,
+            num_layers * num_heads * max_seq_len * max_seq_len,
+            num_layers * max_seq_len * channels,
+            num_layers * max_seq_len * channels,
+            num_layers * max_seq_len * channels,
+            num_layers * max_seq_len,
+            num_layers * max_seq_len,
+            num_layers * max_seq_len * 4 * channels,
+            num_layers * max_seq_len * 4 * channels,
+            num_layers * max_seq_len * channels,
+            num_layers * max_seq_len * channels,
+            max_seq_len * channels,
+            max_seq_len,
+            max_seq_len,
+            max_seq_len * vocab_size,
+            max_seq_len * vocab_size,
+            max_seq_len,
+        ];
+
+        let num_activations: usize = act_sizes.iter().sum();
+
+        let acts = ActivationTensors {
+            encoded: vec![0.0; act_sizes[0]],
+            ln1: vec![0.0; act_sizes[1]],
+            ln1_mean: vec![0.0; act_sizes[2]],
+            ln1_rstd: vec![0.0; act_sizes[3]],
+            qkv: vec![0.0; act_sizes[4]],
+            atty: vec![0.0; act_sizes[5]],
+            preatt: vec![0.0; act_sizes[6]],
+            att: vec![0.0; act_sizes[7]],
+            attproj: vec![0.0; act_sizes[8]],
+            residual2: vec![0.0; act_sizes[9]],
+            ln2: vec![0.0; act_sizes[10]],
+            ln2_mean: vec![0.0; act_sizes[11]],
+            ln2_rstd: vec![0.0; act_sizes[12]],
+            fch: vec![0.0; act_sizes[13]],
+            fch_gelu: vec![0.0; act_sizes[14]],
+            fcproj: vec![0.0; act_sizes[15]],
+            residual3: vec![0.0; act_sizes[16]],
+            lnf: vec![0.0; act_sizes[17]],
+            lnf_mean: vec![0.0; act_sizes[18]],
+            lnf_rstd: vec![0.0; act_sizes[19]],
+            logits: vec![0.0; act_sizes[20]],
+            probs: vec![0.0; act_sizes[21]],
+            losses: vec![0.0; act_sizes[22]],
+        };
+
+        Ok(Self {
             config,
             params,
-            param_sizes,
-            params_memory,
-            num_parameters,
-            grads: unsafe { mem::zeroed() },
-            grads_memory: std::ptr::null_mut(),
-            m_memory: std::ptr::null_mut(),
-            v_memory: std::ptr::null_mut(),
-            acts: unsafe { mem::zeroed() },
-            act_sizes: [0; NUM_ACTIVATION_TENSORS],
-            acts_memory: std::ptr::null_mut(),
-            num_activations: 0,
-            grads_acts: unsafe { mem::zeroed() },
-            grads_acts_memory: std::ptr::null_mut(),
+            grads: ParameterTensors {
+                wte: vec![0.0; param_sizes[0]],
+                wpe: vec![0.0; param_sizes[1]],
+                ln1w: vec![0.0; param_sizes[2]],
+                ln1b: vec![0.0; param_sizes[3]],
+                qkvw: vec![0.0; param_sizes[4]],
+                qkvb: vec![0.0; param_sizes[5]],
+                attprojw: vec![0.0; param_sizes[6]],
+                attprojb: vec![0.0; param_sizes[7]],
+                ln2w: vec![0.0; param_sizes[8]],
+                ln2b: vec![0.0; param_sizes[9]],
+                fcw: vec![0.0; param_sizes[10]],
+                fcb: vec![0.0; param_sizes[11]],
+                fcprojw: vec![0.0; param_sizes[12]],
+                fcprojb: vec![0.0; param_sizes[13]],
+                lnfw: vec![0.0; param_sizes[14]],
+                lnfb: vec![0.0; param_sizes[15]],
+                },
+            m: vec![0.0; num_parameters],
+            v: vec![0.0; num_parameters],
+            acts,
+            grads_acts: ActivationTensors {
+                encoded: vec![0.0; act_sizes[0]],
+                ln1: vec![0.0; act_sizes[1]],
+                ln1_mean: vec![0.0; act_sizes[2]],
+                ln1_rstd: vec![0.0; act_sizes[3]],
+                qkv: vec![0.0; act_sizes[4]],
+                atty: vec![0.0; act_sizes[5]],
+                preatt: vec![0.0; act_sizes[6]],
+                att: vec![0.0; act_sizes[7]],
+                attproj: vec![0.0; act_sizes[8]],
+                residual2: vec![0.0; act_sizes[9]],
+                ln2: vec![0.0; act_sizes[10]],
+                ln2_mean: vec![0.0; act_sizes[11]],
+                ln2_rstd: vec![0.0; act_sizes[12]],
+                fch: vec![0.0; act_sizes[13]],
+                fch_gelu: vec![0.0; act_sizes[14]],
+                fcproj: vec![0.0; act_sizes[15]],
+                residual3: vec![0.0; act_sizes[16]],
+                lnf: vec![0.0; act_sizes[17]],
+                lnf_mean: vec![0.0; act_sizes[18]],
+                lnf_rstd: vec![0.0; act_sizes[19]],
+                logits: vec![0.0; act_sizes[20]],
+                probs: vec![0.0; act_sizes[21]],
+                losses: vec![0.0; act_sizes[22]],
+            },
             batch_size: 0,
             seq_len: 0,
-            inputs: std::ptr::null_mut(),
-            targets: std::ptr::null_mut(),
+            inputs: Vec::new(),
+            targets: Vec::new(),
             mean_loss: -1.0,
-        }
+        })
     }
     
     /// Performs the forward pass of the ViT model.
