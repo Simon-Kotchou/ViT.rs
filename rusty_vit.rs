@@ -352,8 +352,6 @@ impl ViT {
     
     /// Performs the backward pass of the ViT model.
     fn backward(&mut self) {
-        // ... (previous code for memory allocation and gradient zeroing)
-
         let b = self.batch_size;
         let t = self.seq_len;
         let v = self.config.vocab_size;
@@ -361,114 +359,94 @@ impl ViT {
         let nh = self.config.num_heads;
         let c = self.config.channels;
 
-        let params = &self.params;
         let grads = &mut self.grads;
         let acts = &self.acts;
         let grads_acts = &mut self.grads_acts;
 
-        // Backward pass
-        unsafe {
-            let dloss_mean = 1.0 / (b * t) as f32;
-            for i in 0..(b * t) {
-                *grads_acts.losses.add(i) = dloss_mean;
-            }
-
-            // Compute the gradients of the cross-entropy loss and softmax.
-            crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, self.targets, b, t, v);
-            
-            // Compute the gradients of the final matrix multiplication and layer normalization.
-            matmul_backward(grads_acts.lnf, grads.wte, std::ptr::null_mut(), grads_acts.logits, acts.lnf, params.wte, b, t, c, v);
-
-            let mut residual = acts.residual3.add((l - 1) * b * t * c);
-            let mut dresidual = grads_acts.residual3.add((l - 1) * b * t * c);
-
-            layernorm_backward(dresidual, grads.lnfw, grads.lnfb, grads_acts.lnf, residual, params.lnfw, acts.lnf_mean, acts.lnf_rstd, b, t, c);
-
-            for l in (0..l).rev() {
-                residual = if l == 0 {
-                    acts.encoded
-                } else {
-                    acts.residual3.add((l - 1) * b * t * c)
-                };
-                dresidual = if l == 0 {
-                    grads_acts.encoded
-                } else {
-                    grads_acts.residual3.add((l - 1) * b * t * c)
-                };
-
-                let l_ln1w = params.ln1w.add(l * c);
-                let l_qkvw = params.qkvw.add(l * 3 * c * c);
-                let l_attprojw = params.attprojw.add(l * c * c);
-                let l_ln2w = params.ln2w.add(l * c);
-                let l_fcw = params.fcw.add(l * 4 * c * c);
-                let l_fcprojw = params.fcprojw.add(l * c * 4 * c);
-
-                let dl_ln1w = grads.ln1w.add(l * c);
-                let dl_ln1b = grads.ln1b.add(l * c);
-                let dl_qkvw = grads.qkvw.add(l * 3 * c * c);
-                let dl_qkvb = grads.qkvb.add(l * 3 * c);
-                let dl_attprojw = grads.attprojw.add(l * c * c);
-                let dl_attprojb = grads.attprojb.add(l * c);
-                let dl_ln2w = grads.ln2w.add(l * c);
-                let dl_ln2b = grads.ln2b.add(l * c);
-                let dl_fcw = grads.fcw.add(l * 4 * c * c);
-                let dl_fcb = grads.fcb.add(l * 4 * c);
-                let dl_fcprojw = grads.fcprojw.add(l * c * 4 * c);
-                let dl_fcprojb = grads.fcprojb.add(l * c);
-
-                let l_ln1 = acts.ln1.add(l * b * t * c);
-                let l_ln1_mean = acts.ln1_mean.add(l * b * t);
-                let l_ln1_rstd = acts.ln1_rstd.add(l * b * t);
-                let l_qkv = acts.qkv.add(l * b * t * 3 * c);
-                let l_atty = acts.atty.add(l * b * t * c);
-                let l_att = acts.att.add(l * b * nh * t * t);
-                let l_residual2 = acts.residual2.add(l * b * t * c);
-                let l_ln2 = acts.ln2.add(l * b * t * c);
-                let l_ln2_mean = acts.ln2_mean.add(l * b * t);
-                let l_ln2_rstd = acts.ln2_rstd.add(l * b * t);
-                let l_fch = acts.fch.add(l * b * t * 4 * c);
-                let l_fch_gelu = acts.fch_gelu.add(l * b * t * 4 * c);
-
-                let dl_ln1 = grads_acts.ln1.add(l * b * t * c);
-                let dl_qkv = grads_acts.qkv.add(l * b * t * 3 * c);
-                let dl_atty = grads_acts.atty.add(l * b * t * c);
-                let dl_preatt = grads_acts.preatt.add(l * b * nh * t * t);
-                let dl_att = grads_acts.att.add(l * b * nh * t * t);
-                let dl_attproj = grads_acts.attproj.add(l * b * t * c);
-                let dl_residual2 = grads_acts.residual2.add(l * b * t * c);
-                let dl_ln2 = grads_acts.ln2.add(l * b * t * c);
-                let dl_fch = grads_acts.fch.add(l * b * t * 4 * c);
-                let dl_fch_gelu = grads_acts.fch_gelu.add(l * b * t * 4 * c);
-                let dl_fcproj = grads_acts.fcproj.add(l * b * t * c);
-                let dl_residual3 = grads_acts.residual3.add(l * b * t * c);
-
-                // Compute the gradients of the residual connections.
-                residual_backward(dl_residual2, dl_fcproj, dl_residual3, b * t * c);
-                
-                // Compute the gradients of the feed-forward projection and GELU activation.
-                matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, b, t, 4 * c, c);
-                gelu_backward(dl_fch, l_fch, dl_fch_gelu, b * t * 4 * c);
-                
-                // Compute the gradients of the feed-forward matrix multiplication and layer normalization.
-                matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, b, t, c, 4 * c);
-                layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, b, t, c);
-                
-                // Compute the gradients of the residual connections.
-                residual_backward(dresidual, dl_attproj, dl_residual2, b * t * c);
-                
-                // Compute the gradients of the attention projection and multi-head self-attention.
-                matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, b, t, c, c);
-                attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, b, t, c, nh);
-                
-                // Compute the gradients of the query, key, value matrix multiplication and layer normalization.
-                matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, b, t, c, 3 * c);
-                layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, b, t, c);
-            }
-
-            // Compute the gradients of the encoder.
-            encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, self.inputs, b, t, c);
+        let dloss_mean = 1.0 / (b * t) as f32;
+        for i in 0..(b * t) {
+            grads_acts.losses[i] = dloss_mean;
         }
-    }
+
+        crossentropy_softmax_backward(&mut grads_acts.logits, &grads_acts.losses, &acts.probs, &self.targets, b, t, v);
+        matmul_backward(&mut grads_acts.lnf, &mut grads.wte, &mut [], &grads_acts.logits, &acts.lnf, &self.params.wte, b, t, c, v);
+
+        let mut residual = &acts.residual3[(l - 1) * b * t * c..];
+        let mut dresidual = &mut grads_acts.residual3[(l - 1) * b * t * c..];
+
+        layernorm_backward(dresidual, &mut grads.lnfw, &mut grads.lnfb, &grads_acts.lnf, residual, &self.params.lnfw, &acts.lnf_mean, &acts.lnf_rstd, b, t, c);
+
+        for l in (0..l).rev() {
+            residual = if l == 0 {
+                &acts.encoded
+            } else {
+                &acts.residual3[(l - 1) * b * t * c..l * b * t * c]
+            };
+            dresidual = if l == 0 {
+                &mut grads_acts.encoded
+            } else {
+                &mut grads_acts.residual3[(l - 1) * b * t * c..l * b * t * c]
+            };
+
+            let l_ln1w = &self.params.ln1w[l * c..(l + 1) * c];
+            let l_qkvw = &self.params.qkvw[l * 3 * c * c..(l + 1) * 3 * c * c];
+            let l_attprojw = &self.params.attprojw[l * c * c..(l + 1) * c * c];
+            let l_ln2w = &self.params.ln2w[l * c..(l + 1) * c];
+            let l_fcw = &self.params.fcw[l * 4 * c * c..(l + 1) * 4 * c * c];
+            let l_fcprojw = &self.params.fcprojw[l * c * 4 * c..(l + 1) * c * 4 * c];
+
+            let dl_ln1w = &mut grads.ln1w[l * c..(l + 1) * c];
+            let dl_ln1b = &mut grads.ln1b[l * c..(l + 1) * c];
+            let dl_qkvw = &mut grads.qkvw[l * 3 * c * c..(l + 1) * 3 * c * c];
+            let dl_qkvb = &mut grads.qkvb[l * 3 * c..(l + 1) * 3 * c];
+            let dl_attprojw = &mut grads.attprojw[l * c * c..(l + 1) * c * c];
+            let dl_attprojb = &mut grads.attprojb[l * c..(l + 1) * c];
+            let dl_ln2w = &mut grads.ln2w[l * c..(l + 1) * c];
+            let dl_ln2b = &mut grads.ln2b[l * c..(l + 1) * c];
+            let dl_fcw = &mut grads.fcw[l * 4 * c * c..(l + 1) * 4 * c * c];
+            let dl_fcb = &mut grads.fcb[l * 4 * c..(l + 1) * 4 * c];
+            let dl_fcprojw = &mut grads.fcprojw[l * c * 4 * c..(l + 1) * c * 4 * c];
+            let dl_fcprojb = &mut grads.fcprojb[l * c..(l + 1) * c];
+
+            let l_ln1 = &acts.ln1[l * b * t * c..(l + 1) * b * t * c];
+            let l_ln1_mean = &acts.ln1_mean[l * b * t..(l + 1) * b * t];
+            let l_ln1_rstd = &acts.ln1_rstd[l * b * t..(l + 1) * b * t];
+            let l_qkv = &acts.qkv[l * b * t * 3 * c..(l + 1) * b * t * 3 * c];
+            let l_atty = &acts.atty[l * b * t * c..(l + 1) * b * t * c];
+            let l_att = &acts.att[l * b * nh * t * t..(l + 1) * b * nh * t * t];
+            let l_residual2 = &acts.residual2[l * b * t * c..(l + 1) * b * t * c];
+            let l_ln2_mean = &acts.ln2_mean[l * b * t..(l + 1) * b * t];
+           let l_ln2_rstd = &acts.ln2_rstd[l * b * t..(l + 1) * b * t];
+           let l_fch = &acts.fch[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+           let l_fch_gelu = &acts.fch_gelu[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+
+           let dl_ln1 = &mut grads_acts.ln1[l * b * t * c..(l + 1) * b * t * c];
+           let dl_qkv = &mut grads_acts.qkv[l * b * t * 3 * c..(l + 1) * b * t * 3 * c];
+           let dl_atty = &mut grads_acts.atty[l * b * t * c..(l + 1) * b * t * c];
+           let dl_preatt = &mut grads_acts.preatt[l * b * nh * t * t..(l + 1) * b * nh * t * t];
+           let dl_att = &mut grads_acts.att[l * b * nh * t * t..(l + 1) * b * nh * t * t];
+           let dl_attproj = &mut grads_acts.attproj[l * b * t * c..(l + 1) * b * t * c];
+           let dl_residual2 = &mut grads_acts.residual2[l * b * t * c..(l + 1) * b * t * c];
+           let dl_ln2 = &mut grads_acts.ln2[l * b * t * c..(l + 1) * b * t * c];
+           let dl_fch = &mut grads_acts.fch[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+           let dl_fch_gelu = &mut grads_acts.fch_gelu[l * b * t * 4 * c..(l + 1) * b * t * 4 * c];
+           let dl_fcproj = &mut grads_acts.fcproj[l * b * t * c..(l + 1) * b * t * c];
+           let dl_residual3 = &mut grads_acts.residual3[l * b * t * c..(l + 1) * b * t * c];
+
+           residual_backward(dl_residual2, dl_fcproj, dl_residual3, b * t * c);
+           matmul_backward(dl_fch_gelu, dl_fcprojw, dl_fcprojb, dl_fcproj, l_fch_gelu, l_fcprojw, b, t, 4 * c, c);
+           gelu_backward(dl_fch, l_fch, dl_fch_gelu, b * t * 4 * c);
+           matmul_backward(dl_ln2, dl_fcw, dl_fcb, dl_fch, l_ln2, l_fcw, b, t, c, 4 * c);
+           layernorm_backward(dl_residual2, dl_ln2w, dl_ln2b, dl_ln2, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, b, t, c);
+           residual_backward(dresidual, dl_attproj, dl_residual2, b * t * c);
+           matmul_backward(dl_atty, dl_attprojw, dl_attprojb, dl_attproj, l_atty, l_attprojw, b, t, c, c);
+           attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, b, t, c, nh);
+           matmul_backward(dl_ln1, dl_qkvw, dl_qkvb, dl_qkv, l_ln1, l_qkvw, b, t, c, 3 * c);
+           layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, b, t, c);
+       }
+
+       encoder_backward(&mut grads.wte, &mut grads.wpe, &mut grads_acts.encoded, &self.inputs, b, t, c);
+   }
 }
 
 /// Performs the residual forward pass.
